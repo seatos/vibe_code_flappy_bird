@@ -1,0 +1,1078 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Flappy Clone</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #1a1a2e;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      overflow: hidden;
+    }
+    canvas {
+      display: block;
+      cursor: pointer;
+      border-radius: 6px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+    }
+  </style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<script>
+
+// ============================================================
+// CONFIG — all tunable values in one place
+// ============================================================
+const CONFIG = {
+  canvas: { width: 400, height: 600 },
+  bird: {
+    x: 120,
+    startY: 280,
+    radius: 18,
+    flapForce: -8,
+    gravity: 0.45,
+    maxFallSpeed: 12,
+    rotateUp: -25,    // degrees when flapping
+    rotateDown: 70    // degrees at max fall speed
+  },
+  pipe: {
+    width: 60,
+    gap: 155,
+    speed: 3,
+    spawnInterval: 90,
+    minGapY: 120,
+    maxGapY: 430
+  },
+  difficulty: {
+    scoreStep: 10,
+    speedIncrease: 0.2,
+    intervalDecrease: 5,
+    maxSpeed: 6.0,
+    minInterval: 60
+  },
+  colors: {
+    sky: ['#70C5CE', '#4DBCD6'],
+    ground: '#DED895',
+    groundLine: '#B5A642',
+    bird: '#F5D03B',
+    beak: '#F5A623',
+    pipeBody: '#74BF2E',
+    pipeCap: '#548A22',
+    scoreText: '#FFFFFF'
+  },
+  ground: { height: 80 }
+};
+
+// ============================================================
+// PARTICLE — death burst effect
+// ============================================================
+class Particle {
+  constructor(x, y) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 2 + Math.random() * 5;
+    this.x = x;
+    this.y = y;
+    this.vx = Math.cos(angle) * speed;
+    this.vy = Math.sin(angle) * speed - 2;
+    this.radius = 3 + Math.random() * 4;
+    this.life = 40;
+    this.maxLife = 40;
+    this.color = ['#F5D03B', '#F5A623', '#FF8C42', '#FFFFFF'][Math.floor(Math.random() * 4)];
+  }
+
+  update() {
+    this.x += this.vx;
+    this.y += this.vy;
+    this.vy += 0.2;
+    this.life--;
+  }
+
+  draw(ctx) {
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, this.life / this.maxLife);
+    ctx.fillStyle = this.color;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  get dead() { return this.life <= 0; }
+}
+
+// ============================================================
+// BIRD SHAPE PAINTER — shared by Bird.draw() and skin previews.
+// Draws a bird centered at origin, scaled to radius r (design base: r=18).
+// ============================================================
+function drawBirdShape(ctx, skin, r) {
+  const s = r / 18;   // scale factor
+
+  if (skin === 'ghost') {
+    // Semi-transparent white body
+    ctx.save();
+    ctx.globalAlpha = 0.78;
+    ctx.fillStyle = '#E8F8FF';
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // Glowing cyan eye
+    ctx.shadowColor = '#00FFEE';
+    ctx.shadowBlur = Math.round(10 * s);
+    ctx.fillStyle = '#00EEDD';
+    ctx.beginPath();
+    ctx.arc(Math.round(8 * s), Math.round(-6 * s), Math.round(7 * s), 0, Math.PI * 2);
+    ctx.fill();
+
+    // Dark pupil inside glow
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#005555';
+    ctx.beginPath();
+    ctx.arc(Math.round(10 * s), Math.round(-6 * s), Math.round(3.5 * s), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
+
+  const isRed = skin === 'red';
+
+  // Wing
+  ctx.fillStyle = isRed ? '#B82828' : '#C8A820';
+  ctx.beginPath();
+  ctx.ellipse(Math.round(-5 * s), Math.round(7 * s),
+              Math.round(10 * s), Math.round(6 * s), -0.3, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Body
+  ctx.fillStyle = isRed ? '#E8323C' : CONFIG.colors.bird;
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Eye white
+  ctx.fillStyle = '#FFFFFF';
+  ctx.beginPath();
+  ctx.arc(Math.round(8 * s), Math.round(-6 * s), Math.round(7 * s), 0, Math.PI * 2);
+  ctx.fill();
+
+  // Pupil
+  ctx.fillStyle = '#222222';
+  ctx.beginPath();
+  ctx.arc(Math.round(10 * s), Math.round(-6 * s), Math.round(3.5 * s), 0, Math.PI * 2);
+  ctx.fill();
+
+  // Beak (yellow for red bird, orange for classic)
+  ctx.fillStyle = isRed ? '#F5D03B' : CONFIG.colors.beak;
+  ctx.beginPath();
+  ctx.moveTo(Math.round(14 * s), Math.round(-3 * s));
+  ctx.lineTo(Math.round(26 * s), Math.round(1 * s));
+  ctx.lineTo(Math.round(14 * s), Math.round(6 * s));
+  ctx.closePath();
+  ctx.fill();
+}
+
+// ============================================================
+// BIRD
+// ============================================================
+class Bird {
+  constructor() {
+    this.skin  = localStorage.getItem('flappySkin') || 'classic';
+    this.trail = [];   // ghost skin: stores recent {x,y} positions
+    this.reset();
+  }
+
+  reset() {
+    this.x = CONFIG.bird.x;
+    this.y = CONFIG.bird.startY;
+    this.vy = 0;
+    this.rotation = 0;
+    this.trail.length = 0;
+  }
+
+  flap() {
+    this.vy = CONFIG.bird.flapForce;
+  }
+
+  update() {
+    this.vy = Math.min(this.vy + CONFIG.bird.gravity, CONFIG.bird.maxFallSpeed);
+    this.y += this.vy;
+
+    const targetRot = this.vy < 0
+      ? CONFIG.bird.rotateUp
+      : Math.min(CONFIG.bird.rotateDown, this.vy * 6);
+    this.rotation += (targetRot - this.rotation) * 0.15;
+  }
+
+  draw(ctx) {
+    const r = CONFIG.bird.radius;
+
+    // Ghost skin: draw fading cyan trail before the body
+    if (this.skin === 'ghost') {
+      for (let i = 0; i < this.trail.length; i++) {
+        const t = this.trail[i];
+        const frac = (i + 1) / this.trail.length;
+        ctx.save();
+        ctx.globalAlpha = frac * 0.28;
+        ctx.fillStyle = '#AAFFFF';
+        ctx.beginPath();
+        ctx.arc(t.x, t.y, r * (0.4 + frac * 0.55), 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+      this.trail.push({ x: this.x, y: this.y });
+      if (this.trail.length > 8) this.trail.shift();
+    }
+
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.rotation * Math.PI / 180);
+    drawBirdShape(ctx, this.skin, r);
+    ctx.restore();
+  }
+}
+
+// ============================================================
+// PIPE MANAGER
+// ============================================================
+class PipeManager {
+  constructor() {
+    this.pipes = [];
+    this.framesSinceSpawn = 0;
+    this.currentSpeed = CONFIG.pipe.speed;
+    this.currentInterval = CONFIG.pipe.spawnInterval;
+  }
+
+  reset() {
+    this.pipes = [];
+    this.framesSinceSpawn = 0;
+    this.currentSpeed = CONFIG.pipe.speed;
+    this.currentInterval = CONFIG.pipe.spawnInterval;
+  }
+
+  setDifficulty(score) {
+    const steps = Math.floor(score / CONFIG.difficulty.scoreStep);
+    this.currentSpeed = Math.min(
+      CONFIG.pipe.speed + steps * CONFIG.difficulty.speedIncrease,
+      CONFIG.difficulty.maxSpeed
+    );
+    this.currentInterval = Math.max(
+      CONFIG.pipe.spawnInterval - steps * CONFIG.difficulty.intervalDecrease,
+      CONFIG.difficulty.minInterval
+    );
+  }
+
+  spawn() {
+    const minY = CONFIG.pipe.minGapY;
+    const maxY = CONFIG.pipe.maxGapY;
+    const gapCenter = minY + Math.random() * (maxY - minY);
+    this.pipes.push({
+      x: CONFIG.canvas.width + 10,
+      gapTop: gapCenter - CONFIG.pipe.gap / 2,
+      gapBottom: gapCenter + CONFIG.pipe.gap / 2,
+      passed: false
+    });
+  }
+
+  update() {
+    this.framesSinceSpawn++;
+    if (this.framesSinceSpawn >= this.currentInterval) {
+      this.spawn();
+      this.framesSinceSpawn = 0;
+    }
+    for (const p of this.pipes) p.x -= this.currentSpeed;
+    this.pipes = this.pipes.filter(p => p.x + CONFIG.pipe.width + 15 > 0);
+  }
+
+  draw(ctx) {
+    const w = CONFIG.pipe.width;
+    const capW = w + 10;      // cap is 5px wider on each side
+    const capH = 14;
+    const capOff = 5;         // horizontal cap overhang per side
+    const groundY = CONFIG.canvas.height - CONFIG.ground.height;
+
+    for (const pipe of this.pipes) {
+      const px = pipe.x;
+
+      // Top pipe body
+      ctx.fillStyle = CONFIG.colors.pipeBody;
+      ctx.fillRect(px, 0, w, pipe.gapTop - capH);
+
+      // Top pipe cap — at the mouth (bottom) of the top pipe
+      ctx.fillStyle = CONFIG.colors.pipeCap;
+      ctx.fillRect(px - capOff, pipe.gapTop - capH, capW, capH);
+
+      // Bottom pipe body
+      ctx.fillStyle = CONFIG.colors.pipeBody;
+      ctx.fillRect(px, pipe.gapBottom + capH, w, groundY - pipe.gapBottom - capH);
+
+      // Bottom pipe cap — at the mouth (top) of the bottom pipe
+      ctx.fillStyle = CONFIG.colors.pipeCap;
+      ctx.fillRect(px - capOff, pipe.gapBottom, capW, capH);
+    }
+  }
+
+  // Circle-rectangle collision with 3px forgiveness margin
+  checkCollision(bird) {
+    const r = CONFIG.bird.radius - 3;
+    const groundY = CONFIG.canvas.height - CONFIG.ground.height;
+
+    for (const pipe of this.pipes) {
+      const pw = CONFIG.pipe.width;
+      if (this._circleRect(bird.x, bird.y, r, pipe.x, 0, pw, pipe.gapTop)) return true;
+      if (this._circleRect(bird.x, bird.y, r, pipe.x, pipe.gapBottom, pw, groundY - pipe.gapBottom)) return true;
+    }
+    return false;
+  }
+
+  _circleRect(cx, cy, r, rx, ry, rw, rh) {
+    const nearX = Math.max(rx, Math.min(cx, rx + rw));
+    const nearY = Math.max(ry, Math.min(cy, ry + rh));
+    const dx = cx - nearX, dy = cy - nearY;
+    return dx * dx + dy * dy < r * r;
+  }
+
+  checkPassed(bird) {
+    for (const pipe of this.pipes) {
+      if (!pipe.passed && bird.x > pipe.x + CONFIG.pipe.width) {
+        pipe.passed = true;
+        return true;
+      }
+    }
+    return false;
+  }
+}
+
+// ============================================================
+// DAY / NIGHT CYCLE — palette constants and color helpers
+// ============================================================
+const DN = {
+  // Sky gradient: [r, g, b]
+  dayTop:    [112, 197, 206],   // #70C5CE
+  dayBot:    [77,  188, 214],   // #4DBCD6
+  nightTop:  [26,  26,  62],    // #1A1A3E
+  nightBot:  [13,  13,  42],    // #0D0D2A
+  // Cloud fill
+  cloudDay:  [255, 255, 255],
+  cloudNight:[58,  58,  110],   // #3A3A6E
+  // Timing (frames at 60 fps)
+  hold:  30 * 60,   // 1800 f — time spent fully day or fully night
+  trans:  3 * 60,   //  180 f — crossfade duration
+};
+DN.cycle = 2 * (DN.hold + DN.trans);  // full day→night→day period
+
+function lerpCh(a, b, t) { return Math.round(a + (b - a) * t); }
+function lerpRGB(a, b, t) { return [lerpCh(a[0],b[0],t), lerpCh(a[1],b[1],t), lerpCh(a[2],b[2],t)]; }
+function rgb(c)            { return `rgb(${c[0]},${c[1]},${c[2]})`; }
+function rgba(c, a)        { return `rgba(${c[0]},${c[1]},${c[2]},${a.toFixed(3)})`; }
+
+// ============================================================
+// RENDERER
+// ============================================================
+class Renderer {
+  constructor(ctx) {
+    this.ctx = ctx;
+    this.cloudOffset1 = 0;   // layer 1 — 0.5x pipe speed
+    this.cloudOffset2 = 0;   // layer 2 — 0.3x pipe speed
+    this.groundOffset = 0;
+
+    // [startX, y, width, height, layer]
+    this.clouds = [
+      [50,  70,  100, 36, 1],
+      [230, 55,   80, 28, 1],
+      [340, 95,   90, 32, 1],
+      [130, 140,  55, 20, 2],
+      [290, 125,  65, 22, 2],
+    ];
+
+    this.playAgainBtn = null;
+    this.hoverPlayAgain = false;
+    this.skinBtns = null;
+
+    // 15 fixed stars — positions chosen once, redrawn each frame
+    const skyH = CONFIG.canvas.height - CONFIG.ground.height;
+    this.stars = Array.from({ length: 15 }, () => ({
+      x:       8 + Math.random() * (CONFIG.canvas.width - 16),
+      y:       8 + Math.random() * skyH * 0.72,   // upper 72 % of sky
+      r:       0.6 + Math.random() * 1.5,
+      twinkle: Math.random() < 0.5,
+      phase:   Math.random() * Math.PI * 2,
+      speed:   1.5 + Math.random() * 1.5,          // rad/s → period 2–4 s
+    }));
+  }
+
+  setHover(mx, my) {
+    if (!this.playAgainBtn) { this.hoverPlayAgain = false; return; }
+    const b = this.playAgainBtn;
+    this.hoverPlayAgain = mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h;
+  }
+
+  drawBackground(pipeSpeed, playTime) {
+    const { ctx } = this;
+    const { width, height } = CONFIG.canvas;
+    const gh = CONFIG.ground.height;
+
+    // ---- Compute darkness [0..1] from play time -----------------
+    const t = playTime % DN.cycle;
+    let darkness;
+    if      (t < DN.hold)                      darkness = 0;
+    else if (t < DN.hold + DN.trans)           darkness = (t - DN.hold) / DN.trans;
+    else if (t < 2 * DN.hold + DN.trans)       darkness = 1;
+    else                                        darkness = 1 - (t - 2 * DN.hold - DN.trans) / DN.trans;
+
+    // ---- Sky gradient (lerped) ----------------------------------
+    const skyTop = lerpRGB(DN.dayTop,  DN.nightTop,  darkness);
+    const skyBot = lerpRGB(DN.dayBot,  DN.nightBot,  darkness);
+    const grad = ctx.createLinearGradient(0, 0, 0, height - gh);
+    grad.addColorStop(0, rgb(skyTop));
+    grad.addColorStop(1, rgb(skyBot));
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, width, height - gh);
+
+    // ---- Stars (only when sky darkness > 50 %) ------------------
+    if (darkness > 0.5) this._drawStars(darkness);
+
+    // ---- Clouds (lerped color) ----------------------------------
+    this.cloudOffset1 += pipeSpeed * 0.5;
+    this.cloudOffset2 += pipeSpeed * 0.3;
+
+    const cloudRGB   = lerpRGB(DN.cloudDay, DN.cloudNight, darkness);
+    const cloudAlpha = 0.88 - darkness * 0.18;   // 0.88 day → 0.70 night
+    ctx.fillStyle = rgba(cloudRGB, cloudAlpha);
+    for (const [cx, cy, cw, ch, layer] of this.clouds) {
+      const off = layer === 1 ? this.cloudOffset1 : this.cloudOffset2;
+      const total = width + cw;
+      const screenX = ((cx - off % total) % total + total) % total;
+      this._drawCloud(screenX, cy, cw, ch);
+    }
+  }
+
+  _drawStars(darkness) {
+    const { ctx } = this;
+    const now    = Date.now() / 1000;
+    const fadeIn = Math.min(1, (darkness - 0.5) / 0.5);   // 0 at dark=0.5, 1 at dark=1
+
+    for (const star of this.stars) {
+      const baseAlpha = star.twinkle
+        ? 0.55 + 0.45 * Math.sin(now * star.speed + star.phase)   // 0.10 – 1.00
+        : 0.90;
+      ctx.fillStyle = rgba([255, 255, 255], fadeIn * baseAlpha);
+      ctx.beginPath();
+      ctx.arc(star.x, star.y, star.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  _drawCloud(x, y, w, h) {
+    const { ctx } = this;
+    const r = h / 2;
+
+    // Three overlapping circles give a puffy cloud shape
+    ctx.beginPath();
+    ctx.arc(x + r,       y + r,        r,        0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(x + w / 2,   y + r * 0.55, r * 0.85, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(x + w - r,   y + r,        r * 0.9,  0, Math.PI * 2);
+    ctx.fill();
+    // Fill the lower gap between the circles
+    ctx.fillRect(x + r, y + r, w - r * 2, r);
+  }
+
+  drawGround(pipeSpeed) {
+    const { ctx } = this;
+    const { width, height } = CONFIG.canvas;
+    const gh = CONFIG.ground.height;
+    const gy = height - gh;
+
+    this.groundOffset = (this.groundOffset + pipeSpeed) % 30;
+
+    ctx.fillStyle = CONFIG.colors.ground;
+    ctx.fillRect(0, gy, width, gh);
+
+    // Dark top strip
+    ctx.fillStyle = CONFIG.colors.groundLine;
+    ctx.fillRect(0, gy, width, 5);
+
+    // Subtle scrolling ticks
+    ctx.strokeStyle = 'rgba(0,0,0,0.07)';
+    ctx.lineWidth = 1;
+    for (let x = -this.groundOffset; x < width + 30; x += 30) {
+      ctx.beginPath();
+      ctx.moveTo(x, gy + 6);
+      ctx.lineTo(x, gy + gh);
+      ctx.stroke();
+    }
+  }
+
+  drawHUD(state, score, best, scoreFlash, isNewBest, skin) {
+    if (state === 'IDLE') {
+      this._drawStartScreen(skin);
+      return;
+    }
+
+    this._drawScore(score, scoreFlash);
+
+    if (state === 'DEAD') {
+      this._drawGameOver(score, best, isNewBest);
+    }
+  }
+
+  _drawScore(score, flash) {
+    const { ctx } = this;
+    const { width } = CONFIG.canvas;
+
+    const scale = flash > 0 ? 1 + 0.3 * (flash / 10) : 1;
+    const size = Math.round(52 * scale);
+
+    ctx.save();
+    ctx.translate(width / 2, 70);
+    ctx.font = `bold ${size}px Arial`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+    ctx.strokeText(score, 0, 0);
+    ctx.fillStyle = CONFIG.colors.scoreText;
+    ctx.fillText(score, 0, 0);
+    ctx.restore();
+  }
+
+  _drawStartScreen(selectedSkin) {
+    const { ctx } = this;
+    const { width } = CONFIG.canvas;
+
+    // Title
+    ctx.save();
+    ctx.font = 'bold 42px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+    ctx.strokeText('FLAPPY CLONE', width / 2, 150);
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillText('FLAPPY CLONE', width / 2, 150);
+    ctx.restore();
+
+    // ---- Skin selector ------------------------------------------
+    const SKINS = [
+      { id: 'classic', label: 'Classic', cx: 110 },
+      { id: 'red',     label: 'Red',     cx: 200 },
+      { id: 'ghost',   label: 'Ghost',   cx: 290 },
+    ];
+    const CARD_W = 72, CARD_H = 72, CARD_TOP = 348, PREVIEW_R = 20;
+
+    // Section label
+    ctx.font = 'bold 13px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(255,255,255,0.60)';
+    ctx.fillText('SELECT BIRD', width / 2, 333);
+
+    this.skinBtns = [];
+
+    for (const { id, label, cx } of SKINS) {
+      const cardX = cx - CARD_W / 2;
+      const cardCY = CARD_TOP + CARD_H / 2;
+      const selected = id === selectedSkin;
+
+      // Card background
+      ctx.fillStyle = selected ? 'rgba(255,215,0,0.16)' : 'rgba(0,0,0,0.30)';
+      this._roundRect(cardX, CARD_TOP, CARD_W, CARD_H, 10);
+      ctx.fill();
+
+      // Border — gold ring when selected, faint otherwise
+      ctx.lineWidth = selected ? 2.5 : 1.2;
+      ctx.strokeStyle = selected ? '#FFD700' : 'rgba(255,255,255,0.22)';
+      this._roundRect(cardX, CARD_TOP, CARD_W, CARD_H, 10);
+      ctx.stroke();
+
+      // Mini bird preview (save/restore isolates shadow and globalAlpha)
+      ctx.save();
+      ctx.translate(cx, cardCY);
+      drawBirdShape(ctx, id, PREVIEW_R);
+      ctx.restore();
+
+      // Card label
+      ctx.font = selected ? 'bold 12px Arial' : '12px Arial';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = selected ? '#FFD700' : 'rgba(255,255,255,0.72)';
+      ctx.fillText(label, cx, CARD_TOP + CARD_H + 13);
+
+      this.skinBtns.push({ id, x: cardX, y: CARD_TOP, w: CARD_W, h: CARD_H });
+    }
+
+    // Blink "TAP TO START" every 500 ms
+    if (Math.floor(Date.now() / 500) % 2 === 0) {
+      ctx.save();
+      ctx.font = 'bold 22px Arial';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+      ctx.strokeText('TAP TO START', width / 2, 468);
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillText('TAP TO START', width / 2, 468);
+      ctx.restore();
+    }
+  }
+
+  _drawGameOver(score, best, isNewBest) {
+    const { ctx } = this;
+    const { width, height } = CONFIG.canvas;
+
+    const panelW = 300, panelH = 200;
+    const panelX = (width - panelW) / 2;
+    const panelY = Math.round(height / 2 - panelH / 2 - 30);
+
+    // Panel background
+    ctx.fillStyle = 'rgba(18, 18, 38, 0.84)';
+    this._roundRect(panelX, panelY, panelW, panelH, 18);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.13)';
+    ctx.lineWidth = 1.5;
+    this._roundRect(panelX, panelY, panelW, panelH, 18);
+    ctx.stroke();
+
+    // Heading
+    ctx.font = 'bold 30px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#FF6B6B';
+    ctx.fillText('GAME OVER', width / 2, panelY + 44);
+
+    // Divider
+    ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(panelX + 20, panelY + 68);
+    ctx.lineTo(panelX + panelW - 20, panelY + 68);
+    ctx.stroke();
+
+    // Score row
+    ctx.font = '16px Arial';
+    ctx.fillStyle = '#AAAAAA';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('SCORE', panelX + 28, panelY + 100);
+    ctx.font = 'bold 26px Arial';
+    ctx.fillStyle = '#FFFFFF';
+    ctx.textAlign = 'right';
+    ctx.fillText(score, panelX + panelW - 28, panelY + 101);
+
+    // Best row
+    ctx.font = '16px Arial';
+    ctx.fillStyle = '#AAAAAA';
+    ctx.textAlign = 'left';
+    ctx.fillText('BEST', panelX + 28, panelY + 144);
+    ctx.font = 'bold 26px Arial';
+    ctx.fillStyle = '#FFD700';
+    ctx.textAlign = 'right';
+    ctx.fillText(best, panelX + panelW - 28, panelY + 145);
+
+    // Gold "NEW BEST!" badge
+    if (isNewBest) {
+      const badgeW = 72, badgeH = 22;
+      const scoreDigits = String(best).length;
+      const badgeX = panelX + panelW - 28 - scoreDigits * 16 - badgeW - 8;
+      const badgeY = panelY + 134;
+      ctx.fillStyle = '#FFD700';
+      this._roundRect(badgeX, badgeY, badgeW, badgeH, 5);
+      ctx.fill();
+      ctx.font = 'bold 11px Arial';
+      ctx.fillStyle = '#7A5800';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('NEW BEST!', badgeX + badgeW / 2, badgeY + 12);
+    }
+
+    // Play Again button
+    const btnW = 200, btnH = 52;
+    const btnX = (width - btnW) / 2;
+    const btnY = panelY + panelH + 22;
+    const hover = this.hoverPlayAgain;
+
+    ctx.fillStyle = hover ? '#6DD13A' : '#5DBB2E';
+    this._roundRect(btnX, btnY, btnW, btnH, 12);
+    ctx.fill();
+    ctx.strokeStyle = hover ? '#4CAA1C' : '#3D8A1A';
+    ctx.lineWidth = 2.5;
+    this._roundRect(btnX, btnY, btnW, btnH, 12);
+    ctx.stroke();
+
+    ctx.font = 'bold 20px Arial';
+    ctx.fillStyle = '#FFFFFF';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('PLAY AGAIN', width / 2, btnY + btnH / 2);
+
+    this.playAgainBtn = { x: btnX, y: btnY, w: btnW, h: btnH };
+  }
+
+  _roundRect(x, y, w, h, r) {
+    const { ctx } = this;
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+  }
+}
+
+// ============================================================
+// AUDIO MANAGER — Web Audio API, synthesized via OscillatorNode
+// Context is created on first user interaction (autoplay policy).
+// ============================================================
+class AudioManager {
+  constructor() {
+    this._ctx = null;   // AudioContext, lazy-initialised
+    this._ready = false;
+  }
+
+  // Call once on the first user gesture so the AudioContext is allowed.
+  unlock() {
+    if (this._ready) return;
+    this._ctx   = new (window.AudioContext || window.webkitAudioContext)();
+    this._ready = true;
+  }
+
+  // ---- Private helpers ----------------------------------------
+
+  // Ramp an oscillator from freqStart → freqEnd over duration seconds.
+  // Returns the GainNode so callers can chain additional envelopes.
+  _osc(type, freqStart, freqEnd, startTime, duration, gainPeak = 0.4) {
+    const ctx = this._ctx;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.type = type;
+    osc.frequency.setValueAtTime(freqStart, startTime);
+    if (freqEnd !== freqStart) {
+      osc.frequency.linearRampToValueAtTime(freqEnd, startTime + duration);
+    }
+
+    gain.gain.setValueAtTime(gainPeak, startTime);
+    gain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(startTime);
+    osc.stop(startTime + duration + 0.01);
+
+    return gain;
+  }
+
+  // White-noise burst via a short AudioBuffer.
+  _noise(startTime, duration, gainPeak = 0.25) {
+    const ctx = this._ctx;
+    const sampleRate = ctx.sampleRate;
+    const frameCount = Math.ceil(sampleRate * duration);
+    const buffer = ctx.createBuffer(1, frameCount, sampleRate);
+    const data   = buffer.getChannelData(0);
+    for (let i = 0; i < frameCount; i++) data[i] = Math.random() * 2 - 1;
+
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(gainPeak, startTime);
+    gain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+
+    source.connect(gain);
+    gain.connect(ctx.destination);
+    source.start(startTime);
+    source.stop(startTime + duration + 0.01);
+  }
+
+  // ---- Public sound methods -----------------------------------
+
+  // Short sine burst at 520 Hz, 0.08 s
+  playFlap() {
+    if (!this._ready) return;
+    const t = this._ctx.currentTime;
+    this._osc('sine', 520, 520, t, 0.08, 0.3);
+  }
+
+  // Rising two-tone: 600 Hz → 900 Hz over 0.15 s
+  playScore() {
+    if (!this._ready) return;
+    const t = this._ctx.currentTime;
+    this._osc('sine', 600, 900, t, 0.15, 0.35);
+  }
+
+  // Low sawtooth thud at 150 Hz (0.2 s) + white-noise snap
+  playHit() {
+    if (!this._ready) return;
+    const t = this._ctx.currentTime;
+    this._osc('sawtooth', 150, 60, t, 0.2, 0.45);
+    this._noise(t, 0.08, 0.3);
+  }
+
+  // Descending tone 400 → 200 Hz over 0.4 s
+  playGameOver() {
+    if (!this._ready) return;
+    const t = this._ctx.currentTime;
+    this._osc('sine', 400, 200, t, 0.4, 0.4);
+  }
+
+  // Ascending 3-note fanfare: C5 → E5 → G5, staggered
+  playNewBest() {
+    if (!this._ready) return;
+    const t = this._ctx.currentTime;
+    const notes = [523, 659, 784];   // C5, E5, G5
+    notes.forEach((freq, i) => {
+      this._osc('sine', freq, freq, t + i * 0.13, 0.18, 0.4);
+    });
+  }
+}
+
+// ============================================================
+// GAME — state machine: IDLE | PLAYING | DEAD
+// ============================================================
+class Game {
+  constructor() {
+    this.canvas = document.getElementById('gameCanvas');
+    this.canvas.width  = CONFIG.canvas.width;
+    this.canvas.height = CONFIG.canvas.height;
+    this.ctx = this.canvas.getContext('2d');
+
+    this.bird        = new Bird();
+    this.pipeManager = new PipeManager();
+    this.renderer    = new Renderer(this.ctx);
+    this.audio       = new AudioManager();
+    this.particles   = [];
+
+    this.state           = 'IDLE';
+    this.score           = 0;
+    this.best            = parseInt(localStorage.getItem('flappyBestScore') || '0', 10);
+    this.isNewBest       = false;
+    this.frame           = 0;
+    this.scoreFlash      = 0;
+    this.deadFrames      = 0;
+    this.playTime        = 0;   // frames elapsed while PLAYING — drives day/night cycle
+    this.currentPipeSpeed = CONFIG.pipe.speed;
+
+    this._bindInput();
+    this._loop();
+  }
+
+  // ---- Input --------------------------------------------------
+
+  _bindInput() {
+    document.addEventListener('keydown', e => {
+      if (e.code === 'Space') { e.preventDefault(); this.audio.unlock(); this.flap(); }
+    });
+
+    this.canvas.addEventListener('click', e => this._handlePointer(e));
+
+    this.canvas.addEventListener('touchstart', e => {
+      e.preventDefault();
+      this._handlePointer(e.touches[0]);
+    }, { passive: false });
+
+    this.canvas.addEventListener('mousemove', e => {
+      const { mx, my } = this._canvasCoords(e);
+      this.renderer.setHover(mx, my);
+    });
+  }
+
+  _canvasCoords(e) {
+    const rect = this.canvas.getBoundingClientRect();
+    return {
+      mx: (e.clientX - rect.left) * (CONFIG.canvas.width  / rect.width),
+      my: (e.clientY - rect.top)  * (CONFIG.canvas.height / rect.height)
+    };
+  }
+
+  _handlePointer(e) {
+    // In IDLE state check for skin card clicks — intercept before starting the game
+    if (this.state === 'IDLE' && this.renderer.skinBtns) {
+      const { mx, my } = this._canvasCoords(e);
+      for (const btn of this.renderer.skinBtns) {
+        if (mx >= btn.x && mx <= btn.x + btn.w && my >= btn.y && my <= btn.y + btn.h) {
+          this.bird.skin = btn.id;
+          localStorage.setItem('flappySkin', btn.id);
+          return;   // skin selected — don't start the game
+        }
+      }
+    }
+
+    // In DEAD state check for button hit before falling through to flap()
+    if (this.state === 'DEAD' && this.deadFrames >= 30 && this.renderer.playAgainBtn) {
+      const { mx, my } = this._canvasCoords(e);
+      const b = this.renderer.playAgainBtn;
+      if (mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h) {
+        this._restart();
+        return;
+      }
+    }
+    this.flap();
+  }
+
+  flap() {
+    this.audio.unlock();   // satisfies autoplay policy on first gesture
+    if (this.state === 'IDLE') {
+      this._start();
+    } else if (this.state === 'PLAYING') {
+      this.bird.flap();
+      this.audio.playFlap();
+    } else if (this.state === 'DEAD' && this.deadFrames >= 60) {
+      // Any tap/click restarts after a short grace period
+      this._restart();
+    }
+  }
+
+  // ---- State transitions --------------------------------------
+
+  _start() {
+    this.state = 'PLAYING';
+    this.bird.flap();
+  }
+
+  _restart() {
+    this.bird.reset();
+    this.pipeManager.reset();
+    this.particles       = [];
+    this.score           = 0;
+    this.isNewBest       = false;
+    this.scoreFlash      = 0;
+    this.frame           = 0;
+    this.deadFrames      = 0;
+    this.playTime        = 0;
+    this.state           = 'PLAYING';
+    this.bird.flap();
+  }
+
+  _die() {
+    this.state      = 'DEAD';
+    this.deadFrames = 0;
+
+    this.audio.playHit();
+
+    if (this.score > this.best) {
+      this.best      = this.score;
+      this.isNewBest = true;
+      localStorage.setItem('flappyBestScore', String(this.best));
+      // Fanfare fires ~200 ms after the hit thud clears
+      setTimeout(() => this.audio.playNewBest(), 200);
+    } else {
+      // Descending game-over tone fires slightly after the hit thud
+      setTimeout(() => this.audio.playGameOver(), 150);
+    }
+
+    for (let i = 0; i < 10; i++) {
+      this.particles.push(new Particle(this.bird.x, this.bird.y));
+    }
+  }
+
+  // ---- Update -------------------------------------------------
+
+  _update() {
+    this.frame++;
+
+    if (this.state === 'IDLE') {
+      // Bird hovers with sine bob
+      this.bird.y        = CONFIG.bird.startY + Math.sin(this.frame * 0.05) * 8;
+      this.bird.rotation = Math.sin(this.frame * 0.05) * 8;
+      this.currentPipeSpeed = CONFIG.pipe.speed;
+      return;
+    }
+
+    if (this.state === 'PLAYING') {
+      this.playTime++;
+      this.bird.update();
+      this.pipeManager.setDifficulty(this.score);
+      this.currentPipeSpeed = this.pipeManager.currentSpeed;
+      this.pipeManager.update();
+
+      // Scoring
+      if (this.pipeManager.checkPassed(this.bird)) {
+        this.score++;
+        this.scoreFlash = 10;
+        this.audio.playScore();
+      }
+      if (this.scoreFlash > 0) this.scoreFlash--;
+
+      // Collisions
+      if (this.pipeManager.checkCollision(this.bird)) { this._die(); return; }
+
+      const groundY = CONFIG.canvas.height - CONFIG.ground.height;
+      if (this.bird.y + CONFIG.bird.radius >= groundY) {
+        this.bird.y = groundY - CONFIG.bird.radius;
+        this._die();
+        return;
+      }
+
+      if (this.bird.y - CONFIG.bird.radius <= 0) { this._die(); return; }
+
+      return;
+    }
+
+    if (this.state === 'DEAD') {
+      this.deadFrames++;
+
+      // Bird keeps falling after death until it hits the ground
+      this.bird.update();
+      const groundY = CONFIG.canvas.height - CONFIG.ground.height;
+      if (this.bird.y + CONFIG.bird.radius >= groundY) {
+        this.bird.y  = groundY - CONFIG.bird.radius;
+        this.bird.vy = 0;
+      }
+
+      for (const p of this.particles) p.update();
+      this.particles = this.particles.filter(p => !p.dead);
+    }
+  }
+
+  // ---- Render -------------------------------------------------
+
+  _render() {
+    // Freeze world movement on death
+    const pipeSpeed = this.state === 'DEAD' ? 0 : this.currentPipeSpeed;
+
+    this.renderer.drawBackground(pipeSpeed, this.playTime);
+
+    if (this.state !== 'IDLE') {
+      this.pipeManager.draw(this.ctx);
+    }
+
+    this.bird.draw(this.ctx);
+
+    for (const p of this.particles) p.draw(this.ctx);
+
+    this.renderer.drawGround(pipeSpeed);
+    this.renderer.drawHUD(this.state, this.score, this.best, this.scoreFlash, this.isNewBest, this.bird.skin);
+  }
+
+  // ---- Game loop ----------------------------------------------
+
+  _loop() {
+    this._update();
+    this._render();
+    requestAnimationFrame(() => this._loop());
+  }
+}
+
+// ============================================================
+// INIT
+// ============================================================
+window.addEventListener('load', () => new Game());
+
+</script>
+</body>
+</html>
